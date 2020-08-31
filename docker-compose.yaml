@@ -1,0 +1,33 @@
+version: '3.7'
+services:
+    nats:
+      image: 'nats-streaming:0.18.0-alpine3.12'
+      container_name: 'nats'
+      ports:
+        - "4222:4222"
+      command:
+        - "--cluster_id"
+        - test-cluster
+    db:
+      image: 'couchbase'
+      container_name: 'db'
+      ports: 
+        - "8091:8091" 
+        - "8092:8092" 
+        - "8093:8093" 
+        - "8094:8094" 
+        - "11210:11210"
+    message-sender:
+      build: message_sender
+      depends_on:
+        - nats
+    message-reciever:
+      build: message_reciever
+      ports: 
+        - "8080:8080" 
+      depends_on:
+        - nats
+        - db
+
+    
+      
