@@ -2,48 +2,42 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
+	"time"
 	"wb-test/message_reciever/internal/app/repository"
 
 	"github.com/gorilla/mux"
-	"github.com/nats-io/nats.go"
+	"github.com/nats-io/stan.go"
 )
 
 // Server ...
 type Server struct {
-	router       *mux.Router
-	nats         *nats.Conn
-	natsInsertCh chan *nats.Msg
-	natsCountCh  chan *nats.Msg
-	repo         *repository.CouchbaseClient
+	router *mux.Router
+	nats   stan.Conn
+	repo   *repository.CouchbaseClient
 }
 
 // New ...
 func New() *Server {
 	return &Server{
-		router:       mux.NewRouter(),
-		natsInsertCh: make(chan *nats.Msg, 64),
-		natsCountCh:  make(chan *nats.Msg, 64),
-		repo:         repository.New("couchbase://db", "Administrator", "password", "wb-test"),
+		router: mux.NewRouter(),
+		repo:   repository.New("couchbase://db", "Administrator", "password", "wb-test"),
 	}
 }
 
 // Start ...
 func (s *Server) Start() error {
 
-	if err := s.natsConnect(); err != nil {
-		log.Println("natsConnects error : ", err)
-		return err
-	}
-
 	if err := s.repo.Connect(); err != nil {
 		log.Println("couchbaseConnect error : ", err)
 		return err
 	}
 
-	go s.watchNats()
+	if err := s.natsConnect(); err != nil {
+		log.Println("natsConnects error : ", err)
+		return err
+	}
 
 	if err := http.ListenAndServe(":8080", s.router); err != nil {
 		log.Fatal(err)
@@ -53,73 +47,103 @@ func (s *Server) Start() error {
 
 func (s *Server) natsConnect() error {
 	var err error
-	s.nats, err = nats.Connect("nats:4222")
+	s.nats, err = stan.Connect("test-cluster", "message_reciever", stan.NatsURL("nats://nats:4222"), stan.Pings(1, 2))
 	if err != nil {
 		return err
 	}
 
-	_, err = s.nats.ChanSubscribe("insert_message", s.natsInsertCh)
-	if err != nil {
+	if err = s.NatsSubscribeOnInsertMessage(); err != nil {
 		return err
 	}
 
-	_, err = s.nats.ChanSubscribe("get_messages", s.natsCountCh)
-	if err != nil {
+	if err = s.NatsSubscribeOnCountMessage(); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (s *Server) watchNats() {
-	for {
-		select {
-		case msg := <-s.natsInsertCh:
-			var data repository.Message
-			err := json.Unmarshal(msg.Data, &data)
-			if err != nil {
-				log.Println("watchNats natsInsertCh json.Unmarshal error:  ", err)
-				continue
-			}
-			//save to couchbase
-			if err = s.repo.InsertMessage(&data); err != nil {
-				log.Println("watchNats natsInsertCh InsertMessage error:  ", err)
-				continue
-			}
-			fmt.Printf("Inserted: %+v\n", data)
+// NatsSubscribeOnInsertMessage ...
+func (s *Server) NatsSubscribeOnInsertMessage() error {
+	var (
+		data repository.Message
+		err  error
+	)
 
-		case msg := <-s.natsCountCh:
-			var (
-				m    repository.Message
-				data struct {
-					Count int `json:"count"`
-				}
-			)
+	_, err = s.nats.Subscribe("insert_messages", func(m *stan.Msg) {
+		log.Printf("\n Received a message: %s\n", string(m.Data))
+		defer m.Ack()
 
-			err := json.Unmarshal(msg.Data, &m)
-			if err != nil {
-				log.Println("watchNats natsCountCh json.Unmarshal error : ", err)
-				return
-			}
-
-			//get from couchbase
-			data.Count, err = s.repo.GetCountMessages(m.MessageType)
-			if err != nil {
-				log.Println("watchNats natsCountCh GetCountMessages error : ", err)
-				return
-			}
-
-			bytes, err := json.Marshal(data)
-			if err != nil {
-				log.Println("watchNats natsCountCh json.Marshal error : ", err)
-				return
-			}
-
-			err = s.nats.Publish("count_message", bytes)
-			if err != nil {
-				log.Println("watchNats natsCountCh nats.Publish error : ", err)
-				return
-			}
+		err := json.Unmarshal(m.Data, &data)
+		if err != nil {
+			log.Println("NatsSubscribeOnInsertMessage natsInsertCh json.Unmarshal error:  ", err)
+			return
 		}
+		//save to couchbase
+		if err = s.repo.InsertMessage(&data); err != nil {
+			log.Println("NatsSubscribeOnInsertMessage natsInsertCh InsertMessage error:  ", err)
+			return
+		}
+		log.Printf("\n Message Inserted: %+v\n", data)
+	}, stan.SetManualAckMode(), stan.AckWait(60*time.Second))
+	if err != nil {
+		log.Println("NatsSubscribeOnInsertMessage connect to subject - insert_messages  error : ", err)
+		return err
+	}
+	return nil
+}
+
+// NatsSubscribeOnCountMessage ...
+func (s *Server) NatsSubscribeOnCountMessage() error {
+
+	var (
+		message repository.Message
+		data    struct {
+			Count int `json:"count"`
+		}
+		err error
+	)
+	_, err = s.nats.Subscribe("get_message", func(m *stan.Msg) {
+		log.Printf("\n Received a message: %s\n", string(m.Data))
+		defer m.Ack()
+
+		err := json.Unmarshal(m.Data, &message)
+		if err != nil {
+			log.Println("NatsSubscribeOnCountMessage json.Unmarshal error : ", err)
+			return
+		}
+
+		//get from couchbase
+		data.Count, err = s.repo.GetCountMessages(message.MessageType)
+		if err != nil {
+			log.Println("NatsSubscribeOnCountMessage GetCountMessages error : ", err)
+			return
+		}
+
+		bytes, err := json.Marshal(data)
+		if err != nil {
+			log.Println("NatsSubscribeOnCountMessage json.Marshal error : ", err)
+			return
+		}
+
+		nuid, err := s.nats.PublishAsync("count_message", bytes, ackHandler)
+		if err != nil {
+			log.Printf("NatsSubscribeOnCountMessage error publishing msg %s: %v\n", nuid, err.Error())
+			return
+		}
+
+	}, stan.SetManualAckMode(), stan.AckWait(60*time.Second))
+	if err != nil {
+		log.Println("NatsSubscribeOnCountMessage connect to subject - get_message error : ", err)
+		return err
+	}
+	return nil
+}
+
+func ackHandler(ackedNuid string, err error) {
+	if err != nil {
+		log.Printf("Warning: error publishing msg id %s: %v\n", ackedNuid, err.Error())
+	} else {
+		log.Printf("Received ack for msg id %s\n", ackedNuid)
 	}
 }

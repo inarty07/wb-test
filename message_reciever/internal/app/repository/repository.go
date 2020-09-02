@@ -36,19 +36,18 @@ func (cb *CouchbaseClient) Connect() error {
 		Username: cb.username,
 		Password: cb.password,
 		TimeoutsConfig: gocb.TimeoutsConfig{
-			KVTimeout: 30 * time.Second,
+			KVTimeout: time.Minute,
 		},
 	})
 	if err != nil {
 		log.Fatalf("Error couchbase connect:  %v", err)
 	}
-	err = cb.cluster.WaitUntilReady(30*time.Second, nil)
+	err = cb.cluster.WaitUntilReady(time.Minute, nil)
 	if err != nil {
 		log.Fatalf("Error cluster WaitUntilReady:  %v", err)
 	} else {
-		log.Println("Couchbase Started!")
+		log.Println("\033[0;32m Couchbase Started! \033[0m")
 	}
-	// gocb.SetLogger(gocb.VerboseStdioLogger())
 
 	cb.bucket = cb.cluster.Bucket("wb-test")
 	if err = cb.bucket.WaitUntilReady(5*time.Second, nil); err != nil {
